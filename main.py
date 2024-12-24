@@ -141,6 +141,10 @@ def hho_reduction(pd, elem, fun):
 
 def hho_reconstruction(pd,elem): 
     # Listing 8.3 Possible implementation of the reconstruction operator in 1D.
+    # A := R.T @ K_star @ R
+    #      2x4 @  4x4   @ 4x2 (linear K=0)
+    # where K_star is a standard stiffness matrix of order K+1 with constant removed 
+            
     x_bar = cell_center(pd, elem)
     xF1, xF2 = face_centers(pd, elem)
     
@@ -254,10 +258,7 @@ if __name__=='__main__':
         I_elem = hho_reduction(pd, elem, v_func)
         I[elem_dofs] += I_elem
 
-        # returns A(4,4) --> (∇RT (·),∇RT (·))L2(T )
-        # A := R.T @ K_star @ R
-        #      2x4 @  4x4   @ 4x2 
-        # where K_star is a standard stiffness matrix of order 2
+        # returns A --> (∇RT (·),∇RT (·))L2(T )
         A_elem, R_elem = hho_reconstruction(pd, elem)
         
         # stifness matrix
