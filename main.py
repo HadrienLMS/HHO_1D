@@ -6,7 +6,12 @@ from scipy.integrate import quad
 # pd.n_cells: number of cells
 # pd.h: cell diameter, uniform for all elements
 # pd.K: polynomial degree, equal for all elements
+
+# cell dofs of all the cells first 
+# then the edge dofs 
+
 # Github copilot hadrien-beriot_SAGCP
+
 class ProblemDefinition:
     def __init__(self):
         self.domain_length = 0
@@ -114,13 +119,12 @@ def get_matrices(pd, order, elem):
         stiff += qws[ii] * np.outer(dphi.T,dphi) # stiffness matrix
     return mass, stiff
     
-
 def fun_rhs_vector(pd, order, elem, fun):
     rhs = np.zeros((order+1))
     x_bar = cell_center(pd, elem)
     qps, qws, nn = integrate(2*order + 6, pd.h, x_bar)
     for ii in range(nn): 
-        phi, dphi = basis(qps[ii], x_bar, pd.h, order)
+        phi = basis(qps[ii], x_bar, pd.h, order)[0]
         rhs += qws[ii] * phi * fun(qps[ii])
     return rhs
 
@@ -165,8 +169,8 @@ def hho_reconstruction(pd,elem):
     # q  is in P_d*^{k+1} --> 1:       same space as K* --> including super convergent, but remove the constant
     gr_rhs[:,0:pd.K+1] = stiff_mat[1:,0:pd.K+1]; # (∇ vT, ∇ q)L2(T ) 
     # 
-    [phiF1, dphiF1] = basis(xF1, x_bar, pd.h, pd.K+1)
-    [phiF2, dphiF2] = basis(xF2, x_bar, pd.h, pd.K+1)
+    phiF1, dphiF1 = basis(xF1, x_bar, pd.h, pd.K+1)
+    phiF2, dphiF2 = basis(xF2, x_bar, pd.h, pd.K+1)
     
     # Right-hand side, boundary part
     # minus comes from the normal 
@@ -190,14 +194,54 @@ def get_vstar_norm(pd, elem, vstar):
         vstar_norm += qws[ii] * np.dot(vstar,phi[1:]) 
     return vstar_norm
 
-# cell dofs of all the cells first 
-# then the edge dofs 
+def hho_stabilization(pd, elem, R):
+    """
+    Compute the stabilization matrix S for the HHO method.
+    """
+    x_bar = cell_center(pd, elem)
+    xF1, xF2 = face_centers(pd, elem)
+    order_sup = pd.K+1
+    mass_mat = get_matrices(pd, order_sup, elem)[0]
+
+    # Compute the term tmp1 = uT − Σ RT(ˆuT)
+    M = mass_mat[:pd.K+1,:pd.K+1] # M is the p-th order mass matrix
+    Q = mass_mat[:pd.K+1,1:pd.K+2]
+    tmp1 = - np.linalg.solve(M,Q@R)
+    tmp1[:pd.K+1, :pd.K+1] += np.eye(pd.K+1)
+
+    # Compute the stabilization matrix S on F1
+    phiF1 = basis(xF1, x_bar, pd.h, order_sup)[0] # value of cell basis at F1
+    Mi = 1
+    Ti = phiF1[1:] # remove constant
+    Ti_tilde = phiF1[:pd.K+1]
+    tmp2 = (1 / Mi) * Ti.T @ R # tmp2 = Σ RT(ˆuT)
+    tmp2[pd.K+2] = tmp2[pd.K+2]-1; # tmp2 = Σ RT(ˆuT) − uF
+    tmp3 = (1 / Mi) * (Ti_tilde @ tmp1) # tmp3 = Σ(uT − Σ RT(ˆuT))
+    Si = tmp2 + tmp3 # Si = Σ RT(ˆuT) − uF + Σ(uT − Σ RT(ˆuT))
+    S1 = np.outer(Si.T*Mi,Si) / pd.h # Accumulate on S
+
+    # Compute the stabilization matrix S on F2
+    phiF2 = basis(xF2, x_bar, pd.h, order_sup)[0] # value of cell basis at F1
+    Mi = 1
+    Ti = phiF2[1:] # remove constant
+    Ti_tilde = phiF2[:pd.K+1]
+    tmp2 = (1 / Mi) * Ti.T @ R # tmp2 = Σ RT(ˆuT)
+    tmp2[pd.K+2] = tmp2[pd.K+2]-1; # tmp2 = Σ RT(ˆuT) − uF
+    tmp3 = (1 / Mi) * (Ti_tilde @ tmp1) # tmp3 = Σ(uT − Σ RT(ˆuT))
+    Si = tmp2 + tmp3 # Si = Σ RT(ˆuT) − uF + Σ(uT − Σ RT(ˆuT))
+    S2 = np.outer(Si.T*Mi,Si) / pd.h # Accumulate on S
+
+    S = S1 + S2
+
+    return S
+
+###############################################################
 if __name__=='__main__':
 
     pd = ProblemDefinition()
     pd.domain_length = 1
-    pd.K = 1
-    pd.n_cells = 4
+    pd.K = 2
+    pd.n_cells = 2
     pd.compute_element_size()
     pd.compute_n_dofs()
     pd.compute_n_dofs_super()
@@ -206,49 +250,15 @@ if __name__=='__main__':
     # define target function & plot it 
     v_func = lambda x: np.sin(np.pi*x)
 
-    X =[]
-    V_L2 = []
-    V_REF = []
-    # simple projection (L^2)
-    for elem in range(pd.n_cells):
-        print('elem:',elem)
-        x_bar = cell_center(pd, elem)
-        xF1, xF2 = face_centers(pd,elem)
-
-        elem_dofs, cell_dofs, face_dofs = get_dofs(pd,elem)
-        mass = get_matrices(pd, pd.K, elem)[0]
-        v_rhs = fun_rhs_vector(pd, pd.K, elem, v_func)
-
-        coeffs = np.linalg.solve(mass,v_rhs)
-        # plot it 
-        x_plot = np.linspace(xF1,xF2,100)
-        v_proj = np.zeros_like(x_plot)
-        for i, x in enumerate(x_plot):
-            phi = basis(x, x_bar, pd.h, pd.K)[0]
-            v_proj[i] = np.dot(coeffs,phi)
-        v_ref = [v_func(x) for x in x_plot]
-
-        X.extend(x_plot.tolist())
-        V_L2.extend(v_proj.tolist())
-        V_REF.extend(v_ref)
-
-    plt.figure(figsize=(10,6))
-    plt.plot(X,V_REF,'r-',label='v(x) - reference')
-    plt.plot(X,V_L2,'b--',label='L^2 projection of v(x)')
-    plt.legend()
-    plt.savefig("plot_1.png")  # Save as PNG
-
-
-    error_L2 = np.linalg.norm(np.asarray(V_L2)-np.asarray(V_REF))/np.linalg.norm(np.asarray(V_REF))*100
-    print('\nL^2 error (classical projection) in pc:',error_L2)
-
     # hho reduction --> simple L^2
     I = np.zeros(pd.n_dofs)
-    # hho stiffness - using reconstruction
+    # hho stiffness - using reconstruction R^T @ K* @ R and then adding the constant term
     A = np.zeros((pd.n_dofs,pd.n_dofs))
-
+    S = np.zeros_like(A)
+    
     X = []
     V_HHO = []
+    V_L2 = []
     V_REF = []
     for elem in range(pd.n_cells):
         x_bar = cell_center(pd, elem)        
@@ -258,48 +268,59 @@ if __name__=='__main__':
         I_elem = hho_reduction(pd, elem, v_func)
         I[elem_dofs] += I_elem
 
-        # returns A --> (∇RT (·),∇RT (·))L2(T )
+        # Assemble HHO stifness matrix --> A = (∇RT (·),∇RT (·))L2(T )
         A_elem, R_elem = hho_reconstruction(pd, elem)
-        
-        # stifness matrix
         A[np.ix_(elem_dofs, elem_dofs)] = A_elem
     
-        v_star = R_elem @ I_elem      
-        norm_vstar = get_vstar_norm(pd, elem, v_star)        
+        # get the super convergent solution in the cell (up to a constant)
+        v_star = R_elem @ I_elem  
 
+        # now adjust the constant    
+        norm_vstar = get_vstar_norm(pd, elem, v_star)        
         xF1, xF2 = face_centers(pd,elem)
         norm_vT, error = quad(v_func, xF1, xF2, epsabs=1e-12, epsrel=1e-12)
-
-
         v = np.zeros(v_star.shape[0]+1)
         v[1:] = v_star
         v[0] = (norm_vT - norm_vstar)/pd.h
 
-        # plot it - order k+1
+        # also get a classical projection (L^2) for comparison
+        mass = get_matrices(pd, pd.K, elem)[0]
+        v_rhs = fun_rhs_vector(pd, pd.K, elem, v_func)
+        coeffs_L2 = np.linalg.solve(mass,v_rhs)
+
+        # plot it 
         x_plot = np.linspace(xF1,xF2,100)
         v_hho = np.zeros_like(x_plot)
+        v_L2 = np.zeros_like(x_plot)
         for i, x in enumerate(x_plot):
+            # order k+1
             phi = basis(x, x_bar, pd.h, pd.K+1)[0]
             v_hho[i] = np.dot(v,phi)
+            # order k (L^2)
+            phi = basis(x, x_bar, pd.h, pd.K)[0]
+            v_L2[i] = np.dot(coeffs_L2,phi)
+        
+        # target function
         v_ref = [v_func(x) for x in x_plot]
 
         X.extend(x_plot.tolist())
         V_HHO.extend(v_hho.tolist())
+        V_L2.extend(v_L2.tolist())
         V_REF.extend(v_ref)
 
+        # stabilization matrix
+        S_elem = hho_stabilization(pd, elem, R_elem)
+        S[np.ix_(elem_dofs, elem_dofs)] = S_elem
+
+    # plot the result 
     plt.figure(figsize=(10,6))
     plt.plot(X,V_REF,'r-',label='v(x) - reference')
     plt.plot(X,V_L2,'b--',label='L^2 projection of v(x)')
     plt.plot(X,V_HHO,'g--',label='HHO reconstruction of v(x)')
     plt.legend()
-    plt.savefig("plot_2.png")  # Save as PNG   
+    plt.savefig("plot.png")  # Save as PNG   
 
-    print(A)
-
-
-    
-
-
-    # A = model.assemble_lhs()
-
+    print(A + S)
+    condition_number = np.linalg.cond(A + S)
+    print(f"Condition number of A + S: {condition_number}")
 
