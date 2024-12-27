@@ -221,13 +221,14 @@ def hho_vector_from_sol(pd,v_sol):
         A_elem, R_elem = hho_reconstruction(pd, elem)
         vstar = R_elem @ v_sol[elem_dofs]
         vT = v_sol[cell_dofs]
-        # need the constant term
+        # need the constant term of cell dofs 
         norm_vstar = compute_cell_vector_norm(pd, elem, vstar, pd.K+1, is_constant=False)        
         norm_vT =    compute_cell_vector_norm(pd, elem, vT   , pd.K  , is_constant=True)
         v_hho_T = np.zeros(vstar.shape[0]+1)
         v_hho_T[1:] = vstar
         v_hho_T[0] = (norm_vT - norm_vstar)/pd.h
         v_hho[cell_dofs_super] = v_hho_T
+        # inherits face dofs from v_sol
         v_hho[face_dofs_super] = v_sol[face_dofs]
 
     return v_hho
@@ -245,16 +246,6 @@ def compute_cell_vector_norm(pd, elem, vector, order, is_constant = False):
         phi = basis(qps[ii], x_bar, pd.h, order)[0]
         vector_norm += qws[ii] * np.dot(vector, phi[phi_start_index:]) 
     return vector_norm
-
-def get_vstar_norm(pd, elem, vstar):
-    order = pd.K+1 # super convergent
-    vstar_norm = 0
-    x_bar = cell_center(pd, elem)
-    qps, qws, nn = integrate(2*order, pd.h, x_bar)
-    for ii in range(nn): 
-        phi = basis(qps[ii], x_bar, pd.h, order)[0]
-        vstar_norm += qws[ii] * np.dot(vstar,phi[1:]) 
-    return vstar_norm
 
 def hho_stabilization(pd, elem, R):
     """
@@ -297,15 +288,16 @@ def hho_stabilization(pd, elem, R):
 
     return S
 
-def HHO(pd, v_func, is_plot = False):
-    
+def HHO_check_operators(pd, v_func, fig_name = None):
+    # Need to replace everything after I calculation 
+
     # hho reduction --> simple L^2
     I = np.zeros(pd.n_dofs)
     # hho stiffness - using reconstruction R^T @ K* @ R and then adding the constant term
     A = np.zeros((pd.n_dofs,pd.n_dofs))
     S = np.zeros_like(A)
     
-    n_sampling = 100
+    n_sampling = 20
     X = np.zeros(pd.n_cells*n_sampling)
     V_HHO = np.zeros_like(X)
     V_L2 = np.zeros_like(X)
@@ -313,6 +305,7 @@ def HHO(pd, v_func, is_plot = False):
     epsilon = 0
     for elem in range(pd.n_cells):
         x_bar = cell_center(pd, elem)        
+        xF1, xF2 = face_centers(pd,elem)
         elem_dofs, cell_dofs, face_dofs = get_dofs(pd,elem)
 
         # hho_reduction is a simple L2 projection at order p
@@ -329,22 +322,12 @@ def HHO(pd, v_func, is_plot = False):
         v_star = R_elem @ I_elem  
 
         # now adjust the constant    
-        norm_vstar = get_vstar_norm(pd, elem, v_star)        
-        xF1, xF2 = face_centers(pd,elem)
+        norm_vstar = compute_cell_vector_norm(pd, elem, v_star, pd.K+1, is_constant = False)
+        #norm_vstar = get_vstar_norm(pd, elem, v_star)        
         norm_vT, error = quad(v_func, xF1, xF2, epsabs=1e-12, epsrel=1e-12)
         v = np.zeros(v_star.shape[0]+1)
         v[1:] = v_star
         v[0] = (norm_vT - norm_vstar)/pd.h 
-
-        # # let's try to modify R such that it contains the constant term
-        # # this implies that we append a row to R at the top
-        # R_elem_cst = np.vstack((np.zeros_like(R_elem[0]),R_elem))
-        # # then we compute int phi for each shape function (normalization)
-        # phi_norm = get_phi_norm(pd, elem, pd.K+1)
-        # R_elem_cst[0,0] = -phi_norm[1:]/phi_norm[0]
-        # # now we can compute the super convergent solution
-        # v_2 = R_elem_cst @ I_elem - 
-        # did not succeed in doing it this way, the constant term is not correct
 
         # also get a classical projection (L^2) for comparison
         mass = get_matrices(pd, pd.K, elem)[0]
@@ -352,7 +335,7 @@ def HHO(pd, v_func, is_plot = False):
         coeffs_L2 = np.linalg.solve(mass,v_rhs)
 
         # plot it 
-        x_plot = np.linspace(xF1,xF2,100)
+        x_plot = np.linspace(xF1,xF2,n_sampling)
         for i, x in enumerate(x_plot):
             # order k+1
             phi = basis(x, x_bar, pd.h, pd.K+1)[0]
@@ -382,18 +365,17 @@ def HHO(pd, v_func, is_plot = False):
     print('relative L^2 reconstruction error (in percent): ', error_L2)
     print('relative HHO reconstruction error (in percent): ', error_HHO)
 
+    X_F = np.linspace(0, pd.domain_length, pd.n_cells + 1)
+    V_F = np.array([v_func(x) for x in X_F])
     # plot the result 
-    if is_plot:
+    if fig_name is not None:
         plt.figure(figsize=(10,6))
-        plt.plot(X,V_REF,'r-',label='v(x) - reference')
-        plt.plot(X,V_L2,'b--',label='L^2 projection of v(x)')
-        plt.plot(X,V_HHO,'g--',label='HHO reconstruction of v(x)')
+        #plt.plot(X,V_REF,'r-',label='v(x) - reference')
+        plt.plot(X,V_HHO,'b--',label='Reconstruction')
+        plt.plot(X,V_L2,'r.',label='Cell function')
+        plt.plot(X_F,V_F,'k*',label='Face function')
         plt.legend()
-        plt.savefig("single_run.png")  # Save as PNG   
-
-    Stiffness = A + S
-    condition_number = np.linalg.cond(Stiffness)
-    print(f"Condition number of A + S: {condition_number}")
+        plt.savefig(fig_name + ".png")  # Save as PNG
 
     # ############################################
     # # Try now a global reduction V_L2 = PHI @ I
@@ -412,8 +394,60 @@ def HHO(pd, v_func, is_plot = False):
         
     # V_L2 = PHI @ I
 
-    return error_L2, error_HHO, error_jump, Stiffness
+    return error_L2, error_HHO, error_jump
 
+def HHO_Assemble_Stiffness(pd):
+    # Assemble HHO stifness matrix 
+    # A = (∇RT (·),∇RT (·))L2(T ) - still missing the constant term though
+    A = np.zeros((pd.n_dofs,pd.n_dofs))
+    S = np.zeros_like(A)
+    
+    for elem in range(pd.n_cells):
+        elem_dofs, cell_dofs, face_dofs = get_dofs(pd,elem)
+
+        A_elem, R_elem = hho_reconstruction(pd, elem)
+        A[np.ix_(elem_dofs, elem_dofs)] += A_elem 
+    
+        S_elem = hho_stabilization(pd, elem, R_elem)
+        S[np.ix_(elem_dofs, elem_dofs)] += S_elem
+
+    Stiffness = A + S
+    return Stiffness
+
+def HHO_Apply_Dirichlet_BC(pd,Stiffness,Dirichlet_0,Dirichlet_1):
+    # Enforce Dirichlet BC by constraint
+    rhs_vector = np.zeros(pd.n_dofs)
+    if Dirichlet_0 is not None:
+        dof_0 = get_face_dofs(pd,elem=0)[0]
+        rhs_vector[dof_0] = Dirichlet_0 
+        Stiffness[dof_0,:] = 0 
+        Stiffness[dof_0,dof_0] = 1        
+    if Dirichlet_1 is not None:
+        rhs_vector[-1] = Dirichlet_1
+        Stiffness[-1,:] = 0
+        Stiffness[-1,-1] = 1
+    return Stiffness, rhs_vector
+
+def interpolate(pd,sol,n_sampling,is_super = False):
+    # Interpolate on mesh a solution vector (super-convergent or not)
+    X = np.zeros(pd.n_cells*n_sampling)
+    V = np.zeros(pd.n_cells*n_sampling)
+    for elem in range(pd.n_cells):
+        x_bar = cell_center(pd, elem)
+        xF1, xF2 = face_centers(pd,elem)
+        if is_super:
+            elem_dofs, cell_dofs, face_dofs = get_dofs_super(pd,elem)
+            order = pd.K+1
+        else:
+            elem_dofs, cell_dofs, face_dofs = get_dofs(pd,elem)
+            order = pd.K
+        x_plot = np.linspace(xF1,xF2,n_sampling)
+        for i, x in enumerate(x_plot):
+            X[elem*n_sampling+i] = x 
+            phi = basis(x, x_bar, pd.h, order)[0]
+            V[elem*n_sampling+i] = np.dot(sol[cell_dofs],phi)
+    
+    return X, V
 
 ###############################################################
 ###############################################################
@@ -421,92 +455,103 @@ def HHO(pd, v_func, is_plot = False):
 ###############################################################
 if __name__=='__main__':
 
-    pd_single_run = ProblemDefinition()
-    pd_single_run.domain_length = 2
-    pd_single_run.K = 0
-    pd_single_run.n_cells = 2
-    pd_single_run.initialize()
+    # Operators Check
+    # TEST_ID = 0 --> OPERATORS CHECK (TARGET FUNCTION) ON A SINGLE RUN - FIG 8.9
+    # TEST_ID = 1 --> OPERATORS CHECK (TARGET FUNCTION) - CONVERGENCE
+
+    # Dirichlet problem
+    # TEST_ID = 2 --> DIRICHLET PROBLEM, SINGLE RUN
+
+    # To do next: 
+    # Neuman BCs 
+    # volume source
+    # Convergence studies on more complex solutions
     
-    # define target function & plot it 
-    v_func = lambda x: np.sin(np.pi*x)
+    TEST_ID = 2
 
-    # SINGLE RUN 
-    HHO(pd_single_run, v_func, is_plot = False)
+    if TEST_ID == 0:
+        pd_single_run = ProblemDefinition()
+        pd_single_run.domain_length = 1
+        # target function 
+        v_func = lambda x: np.sin(np.pi*x)
+        
+        pd_single_run.K = 0
+        pd_single_run.n_cells = 8
+        pd_single_run.initialize()
+        HHO_check_operators(pd_single_run, v_func, 'fig8p4_1')
 
-    # SINGLE RUN WITH DIRICHLET BC
-    Stiffness = HHO(pd_single_run, v_func, is_plot = True)[3]
-    rhs_vector = np.zeros(pd_single_run.n_dofs)
-    rhs_vector[0] = 0; rhs_vector[-1] = 10
-    b_start_dof = pd_single_run.n_cells*(pd_single_run.K+1)
-    Stiffness[b_start_dof,:] = 0; Stiffness[b_start_dof,b_start_dof] = 1
-    b_end_dof = pd_single_run.n_dofs-1
-    Stiffness[b_end_dof,:] = 0; Stiffness[b_end_dof,b_end_dof] = 1
-    sol = np.linalg.solve(Stiffness,rhs_vector)
-    sol_hho = hho_vector_from_sol(pd_single_run,sol)
-    
-    condition_number = np.linalg.cond(Stiffness)
-    print(f"Stiffness matrix condition number: {condition_number}")   
+        pd_single_run.K = 1
+        pd_single_run.n_cells = 4
+        pd_single_run.initialize()
+        HHO_check_operators(pd_single_run, v_func, 'fig8p4_2')
 
-    n_sampling = 100
-    X = np.zeros(pd_single_run.n_cells*n_sampling)
-    plot_sol_hho = np.zeros(pd_single_run.n_cells*n_sampling)
-    plot_sol     = np.zeros_like(plot_sol_hho)
-    for elem in range(pd_single_run.n_cells):
-        x_bar = cell_center(pd_single_run, elem)
-        xF1, xF2 = face_centers(pd_single_run,elem)
-        elem_dofs, cell_dofs, face_dofs = get_dofs(pd_single_run,elem)
-        elem_dofs_super, cell_dofs_super, face_dofs_super = get_dofs_super(pd_single_run,elem)
-        x_plot = np.linspace(xF1,xF2,n_sampling)
-        for i, x in enumerate(x_plot):
-            phi = basis(x, x_bar, pd_single_run.h, pd_single_run.K)[0]
-            phi_super = basis(x, x_bar, pd_single_run.h, pd_single_run.K+1)[0]
-            plot_sol[elem*n_sampling+i] = np.dot(sol[cell_dofs],phi)
-            plot_sol_hho[elem*n_sampling+i] = np.dot(sol_hho[cell_dofs_super],phi_super)           
-            X[elem*n_sampling+i] = x 
-    
-    plt.figure(figsize=(10,6))
-    plt.plot(X, plot_sol,'b-',label='solution with Dirichlet BC (not super convergent)')
-    plt.plot(X, plot_sol_hho,'r-',label='HHO solution with Dirichlet BC')
-    plt.legend()
-    plt.show()
-    plt.pause(0.001)
-    plt.savefig("dirichlet_bc.png")  # Save as PNG
+    elif TEST_ID == 1:
+        # CONVERGENCE STUDY
+        pd_conv_study = ProblemDefinition()
+        pd_conv_study.domain_length = 1 # larger domain length 
+        # target function 
+        v_func = lambda x: np.sin(np.pi*x)
+
+        N_CELLS = np.array([2,3,4,5,6,7,8,9,10,11,12,14,16,18,20,22,26,28,30,40,50,60,80]).astype(int)
+        ORDERS = np.array([0,1,2,3])
+
+        ERROR_HHO = np.zeros((len(ORDERS),len(N_CELLS)))
+        ERROR_L2 = np.zeros((len(ORDERS),len(N_CELLS)))
+        ERROR_jump = np.zeros((len(ORDERS),len(N_CELLS)))
+        for i_order, K in enumerate(ORDERS):
+            for i_cell, n_cells in enumerate(N_CELLS):
+                pd_conv_study.n_cells = n_cells
+                pd_conv_study.K = K
+                pd_conv_study.initialize()
+                error_L2, error_HHO, error_jump = HHO_check_operators(pd_conv_study, v_func, fig_name= None)
+                ERROR_HHO[i_order,i_cell] = error_HHO
+                ERROR_L2[i_order,i_cell] = error_L2
+                ERROR_jump[i_order,i_cell] = error_jump
+
+        # Plotting in log scale
+        plt.figure(figsize=(6,10))
+        for i_order, K in enumerate(ORDERS):
+            plt.loglog(1/N_CELLS, ERROR_HHO[i_order,:],'k',linewidth=2)
+            plt.loglog(1/N_CELLS, ERROR_L2[i_order,:], 'b--')
+            plt.loglog(1/N_CELLS, ERROR_jump[i_order,:], 'r--')
+        plt.xlabel('1 / Number of Cells')
+        plt.ylabel('Error (in percent)')
+        # plt.legend()
+        plt.grid(True, which="both", ls="--")
+        plt.savefig("check_operators_convergence.png")
+
+    elif TEST_ID == 2:
+
+        pd_dir = ProblemDefinition()
+        pd_dir.domain_length = 1
+        pd_dir.K = 0
+        pd_dir.n_cells = 2
+        pd_dir.initialize()
+
+        # Dirichlet BCs
+        D0 = 4; D1 = 10
+        # SINGLE RUN WITH DIRICHLET BC
+        Stiffness = HHO_Assemble_Stiffness(pd_dir)
+        Stiffness, Rhs  = HHO_Apply_Dirichlet_BC(pd_dir, Stiffness, Dirichlet_0=D0, Dirichlet_1=D1)
+
+        sol = np.linalg.solve(Stiffness,Rhs)
+        sol_hho = hho_vector_from_sol(pd_dir,sol)
+        
+        condition_number = np.linalg.cond(Stiffness)
+        print(f"Stiffness matrix condition number: {condition_number}")   
+
+        X, plot_sol     = interpolate(pd_dir,sol,    n_sampling=100,is_super = False)
+        X, plot_sol_hho = interpolate(pd_dir,sol_hho,n_sampling=100,is_super = True )
+        
+        X_F = np.linspace(0,pd_dir.domain_length,pd_dir.n_cells+1)
+        V_F = sol[pd_dir.n_cells*(pd_dir.K+1):]
+        plt.figure(figsize=(10,6))
+        plt.plot(X, plot_sol_hho,'b--',label='Reconstruction')
+        plt.plot(X, plot_sol,'r.',label='Cell function')
+        plt.plot(X_F,V_F,'k*',label='Face Function')
+        plt.legend()
+        plt.savefig("dirichlet_bc.png")  # Save as PNG
+        #plt.show()
 
 
-    # CONVERGENCE STUDY
-    pd_conv_study = ProblemDefinition()
-    pd_conv_study.domain_length = 1
-    
-    #h = np.logspace(0,-2,100)
-    N_CELLS = np.array([2,3,4,5,6,7,8,9,10,11,12,14,16,18,20,22,26,28,30,40,50,60,80]).astype(int)
-    print(N_CELLS)
-    ORDERS = np.array([0,1,2,3])
-
-    ERROR_HHO = np.zeros((len(ORDERS),len(N_CELLS)))
-    ERROR_L2 = np.zeros((len(ORDERS),len(N_CELLS)))
-    ERROR_jump = np.zeros((len(ORDERS),len(N_CELLS)))
-
-    for i_order, K in enumerate(ORDERS):
-        for i_cell, n_cells in enumerate(N_CELLS):
-            pd_conv_study.n_cells = n_cells
-            pd_conv_study.K = K
-            pd_conv_study.initialize()
-            error_L2, error_HHO, error_jump = HHO(pd_conv_study, v_func, is_plot = False)[0:3]
-            ERROR_HHO[i_order,i_cell] = error_HHO
-            ERROR_L2[i_order,i_cell] = error_L2
-            ERROR_jump[i_order,i_cell] = error_jump
-
-    # Plotting in log scale
-    plt.figure(figsize=(6,10))
-    for i_order, K in enumerate(ORDERS):
-        plt.loglog(1/N_CELLS, ERROR_HHO[i_order,:],'k',linewidth=2)
-        plt.loglog(1/N_CELLS, ERROR_L2[i_order,:], 'b--')
-        plt.loglog(1/N_CELLS, ERROR_jump[i_order,:], 'r--')
-    plt.xlabel('1 / Number of Cells')
-    plt.ylabel('Error (in percent)')
-    # plt.legend()
-    plt.grid(True, which="both", ls="--")
-    plt.savefig("convergence_study.png")
-    #plt.pause(0.001)
-    #plt.show()
-    print(K)
+ 
