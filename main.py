@@ -442,8 +442,13 @@ def HHO_Apply_Dirichlet_BC(pd,Stiffness,rhs_vector):
 def HHO_Apply_Source(pd,rhs_vector):
     # Enforce Dirichlet BC by constraint
     if pd.Source_func is not None:
-        #dof_0 = get_face_dofs(pd,elem=0)[0]
-        rhs_vector[0] = pd.Source_func(0) 
+        for elem in range(pd.n_cells):
+            x_bar = cell_center(pd, elem)
+            elem_dofs, cell_dofs, face_dofs = get_dofs(pd,elem)
+            qps, qws, nn = integrate(2*pd.K + 2, pd.h, x_bar)
+            for ii in range(nn):
+                phi = basis(qps[ii], x_bar, pd.h, pd.K)[0]
+                rhs_vector[cell_dofs] -= qws[ii] * phi * pd.Source_func(qps[ii])
     return rhs_vector
 
 def interpolate(pd,sol,n_sampling,is_super = False):
@@ -497,13 +502,12 @@ if __name__=='__main__':
     # TEST_ID = 2 --> DIRICHLET PROBLEM, SINGLE RUN
     # TEST_ID = 3 --> DIRICHLET-NEUMANN PROBLEM, SINGLE RUN
     # TEST_ID = 4 --> DIRICHLET-NEUMANN PROBLEM + SOURCE TERM, SINGLE RUN
+    # TEST_ID = 5 --> DIRICHLET-NEUMANN PROBLEM + SOURCE TERM, CONVERGENCE 
     
     # To do next: 
-    # - volume source
-    # - Convergence studies on more complex solutions
     # - static condensation 
     
-    TEST_ID = 4
+    TEST_ID = 5
 
     if TEST_ID == 0:
         pd_single_run = ProblemDefinition()
@@ -625,14 +629,14 @@ if __name__=='__main__':
         print(f"\t - with HHO reconstruction: {error_hho}")
 
     elif TEST_ID == 4:
-        # Dirichlet - Neumann 
+        # Dirichlet - Neumann - Source
         pd_all = ProblemDefinition()
-        pd_all.domain_length = 1
-        pd_all.K = 0
-        pd_all.n_cells = 10
+        pd_all.domain_length = 4
+        pd_all.K = 6
+        pd_all.n_cells = 1
         # BCs
         pd_all.Dirichlet_0 = 0; 
-        pd_all.Neumann_1 = 1
+        pd_all.Neumann_1 = 0.1
         pd_all.Source_func = lambda x: np.sin(np.pi*x)
         pd_all.initialize()
 
@@ -641,21 +645,76 @@ if __name__=='__main__':
         X, plot_sol     = interpolate(pd_all,sol,    n_sampling=20,is_super = False)
         X, plot_sol_hho = interpolate(pd_all,sol_hho,n_sampling=20,is_super = True )
         
+        # Compute the analytical solution
+        L = pd_all.domain_length
+        u0 = pd_all.Dirichlet_0; g = pd_all.Neumann_1
+        coefficient = g + np.cos(np.pi * L) / np.pi
+        plot_ref = - np.sin(np.pi * X) / np.pi**2 + coefficient * X + u0
+
         X_F = np.linspace(0,pd_all.domain_length,pd_all.n_cells+1)
         V_F = sol[pd_all.n_cells*(pd_all.K+1):]
         plt.figure(figsize=(10,6))
         plt.plot(X, plot_sol_hho,'b--',label='Reconstruction')
         plt.plot(X, plot_sol,'r.',label='Cell function')
         plt.plot(X_F,V_F,'k*',label='Face Function')
+        plt.plot(X, plot_ref, 'k--',label = 'reference')
         plt.legend()
-        plt.savefig("dirichlet-Neumann_bc.png")  # Save as PNG
+        plt.savefig("dirichlet-Neumann_bc_Source.png")  
         #plt.show()
 
-        D0 = pd_all.Dirichlet_0; N1 = pd_all.Neumann_1
-        ref_solution = N1*X/pd_all.domain_length + (D0)
-        error_hho = np.linalg.norm(plot_sol_hho-ref_solution)/np.linalg.norm(ref_solution)*100
-        error_sol = np.linalg.norm(plot_sol-ref_solution)/np.linalg.norm(ref_solution)*100
+        error_hho = np.linalg.norm(plot_sol_hho-plot_ref)/np.linalg.norm(plot_ref)*100
+        error_sol = np.linalg.norm(plot_sol-plot_ref)/np.linalg.norm(plot_ref)*100
         print(f"\ntest #3: Dirichlet-Neuman problem - relative error (in percent)")
         print(f"\t - no reconstruction      : {error_sol}")
         print(f"\t - with HHO reconstruction: {error_hho}")
- 
+
+    elif TEST_ID == 5:
+        # Dirichlet - Neumann - Source --> CONVERGENCE 
+        pd_conv_study = ProblemDefinition()
+        pd_conv_study.domain_length = 1  
+        
+        N_CELLS = np.array([1,2,4,8,16,32]).astype(int)
+        ORDERS = np.array([0,1,2,3,4,5,6])
+
+        ERROR_HHO = np.zeros((len(ORDERS),len(N_CELLS)))
+        ERROR_SOL = np.zeros_like(ERROR_HHO)
+        for i_order, K in enumerate(ORDERS):
+            for i_cell, n_cells in enumerate(N_CELLS):
+                pd_conv_study.n_cells = n_cells
+                pd_conv_study.K = K
+                # BCs
+                pd_conv_study.Dirichlet_0 = 0; 
+                pd_conv_study.Neumann_1 = 0.1
+                pd_conv_study.Source_func = lambda x: np.sin(np.pi*x)
+                pd_conv_study.initialize()
+                
+                sol, sol_hho = Solve_HHO_Problem(pd_conv_study) 
+
+                X, plot_sol     = interpolate(pd_conv_study,sol,    n_sampling=100,is_super = False)
+                X, plot_sol_hho = interpolate(pd_conv_study,sol_hho,n_sampling=100,is_super = True )
+        
+                # Compute the analytical solution
+                L = pd_conv_study.domain_length
+                u0 = pd_conv_study.Dirichlet_0; g = pd_conv_study.Neumann_1
+                coefficient = g + np.cos(np.pi * L) / np.pi
+                plot_ref = - np.sin(np.pi * X) / np.pi**2 + coefficient * X + u0
+
+                error_hho = np.linalg.norm(plot_sol_hho-plot_ref)/np.linalg.norm(plot_ref)*100
+                error_sol = np.linalg.norm(plot_sol-plot_ref)/np.linalg.norm(plot_ref)*100
+                print(f"\ntest #3: Dirichlet-Neuman problem - relative error (in percent)")
+                print(f"\t - no reconstruction      : {error_sol}")
+                print(f"\t - with HHO reconstruction: {error_hho}")
+
+                ERROR_SOL[i_order,i_cell] = error_sol
+                ERROR_HHO[i_order,i_cell] = error_hho
+
+        # Plotting in log scale
+        plt.figure(figsize=(6,10))
+        for i_order, K in enumerate(ORDERS):
+            plt.loglog(1/N_CELLS, ERROR_SOL[i_order,:],'r:',linewidth=2)
+            plt.loglog(1/N_CELLS, ERROR_HHO[i_order,:],'b-',linewidth=2)
+        plt.xlabel('1 / Number of Cells')
+        plt.ylabel('Error (in percent)')
+        # plt.legend()
+        plt.grid(True, which="both", ls="--")
+        plt.savefig("1d_Poisson_convergence.png")
