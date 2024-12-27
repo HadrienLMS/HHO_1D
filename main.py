@@ -21,6 +21,12 @@ class ProblemDefinition:
         self.n_dofs = 0
         self.n_dofs_super = 0
 
+        self.Dirichlet_0 = None
+        self.Dirichlet_1 = None
+        self.Neumann_1 = None
+
+        self.Source_func = None
+
     def initialize(self):
         self.compute_element_size()
         self.compute_n_dofs()
@@ -414,19 +420,31 @@ def HHO_Assemble_Stiffness(pd):
     Stiffness = A + S
     return Stiffness
 
-def HHO_Apply_Dirichlet_BC(pd,Stiffness,Dirichlet_0,Dirichlet_1):
+def HHO_Apply_Neumann_BC(pd,rhs_vector):
+    # Enforce Neumann BC at the end    
+    if pd.Neumann_1 is not None:
+        rhs_vector[-1] = pd.Neumann_1
+    return rhs_vector
+
+def HHO_Apply_Dirichlet_BC(pd,Stiffness,rhs_vector):
     # Enforce Dirichlet BC by constraint
-    rhs_vector = np.zeros(pd.n_dofs)
-    if Dirichlet_0 is not None:
+    if pd.Dirichlet_0 is not None:
         dof_0 = get_face_dofs(pd,elem=0)[0]
-        rhs_vector[dof_0] = Dirichlet_0 
+        rhs_vector[dof_0] = pd.Dirichlet_0 
         Stiffness[dof_0,:] = 0 
         Stiffness[dof_0,dof_0] = 1        
-    if Dirichlet_1 is not None:
-        rhs_vector[-1] = Dirichlet_1
+    if pd.Dirichlet_1 is not None:
+        rhs_vector[-1] = pd.Dirichlet_1
         Stiffness[-1,:] = 0
         Stiffness[-1,-1] = 1
     return Stiffness, rhs_vector
+
+def HHO_Apply_Source(pd,rhs_vector):
+    # Enforce Dirichlet BC by constraint
+    if pd.Source_func is not None:
+        #dof_0 = get_face_dofs(pd,elem=0)[0]
+        rhs_vector[0] = pd.Source_func(0) 
+    return rhs_vector
 
 def interpolate(pd,sol,n_sampling,is_super = False):
     # Interpolate on mesh a solution vector (super-convergent or not)
@@ -449,6 +467,22 @@ def interpolate(pd,sol,n_sampling,is_super = False):
     
     return X, V
 
+def Solve_HHO_Problem(pd):
+    # SINGLE RUN WITH NEUMAN OR DIRICHLET BC
+    Rhs = np.zeros(pd.n_dofs)
+    Stiffness = HHO_Assemble_Stiffness(pd)
+    Stiffness, Rhs  = HHO_Apply_Dirichlet_BC(pd, Stiffness, Rhs)
+    Rhs  = HHO_Apply_Neumann_BC(pd, Rhs)
+    Rhs  = HHO_Apply_Source(pd, Rhs)
+
+    sol = np.linalg.solve(Stiffness,Rhs)
+    sol_hho = hho_vector_from_sol(pd,sol)
+    
+    condition_number = np.linalg.cond(Stiffness)
+    print(f"Stiffness matrix condition number: {condition_number}")   
+    
+    return sol, sol_hho
+
 ###############################################################
 ###############################################################
 ###############################################################
@@ -459,15 +493,17 @@ if __name__=='__main__':
     # TEST_ID = 0 --> OPERATORS CHECK (TARGET FUNCTION) ON A SINGLE RUN - FIG 8.9
     # TEST_ID = 1 --> OPERATORS CHECK (TARGET FUNCTION) - CONVERGENCE
 
-    # Dirichlet problem
+    # Solving real 1D problems
     # TEST_ID = 2 --> DIRICHLET PROBLEM, SINGLE RUN
-
-    # To do next: 
-    # Neuman BCs 
-    # volume source
-    # Convergence studies on more complex solutions
+    # TEST_ID = 3 --> DIRICHLET-NEUMANN PROBLEM, SINGLE RUN
+    # TEST_ID = 4 --> DIRICHLET-NEUMANN PROBLEM + SOURCE TERM, SINGLE RUN
     
-    TEST_ID = 2
+    # To do next: 
+    # - volume source
+    # - Convergence studies on more complex solutions
+    # - static condensation 
+    
+    TEST_ID = 4
 
     if TEST_ID == 0:
         pd_single_run = ProblemDefinition()
@@ -521,27 +557,20 @@ if __name__=='__main__':
         plt.savefig("check_operators_convergence.png")
 
     elif TEST_ID == 2:
-
+        # Dirichlet - Dirichlet 
         pd_dir = ProblemDefinition()
         pd_dir.domain_length = 1
         pd_dir.K = 0
-        pd_dir.n_cells = 2
+        pd_dir.n_cells = 3
+        # BCs
+        pd_dir.Dirichlet_0 = 4; 
+        pd_dir.Dirichlet_1 = -11.5
         pd_dir.initialize()
 
-        # Dirichlet BCs
-        D0 = 4; D1 = 10
-        # SINGLE RUN WITH DIRICHLET BC
-        Stiffness = HHO_Assemble_Stiffness(pd_dir)
-        Stiffness, Rhs  = HHO_Apply_Dirichlet_BC(pd_dir, Stiffness, Dirichlet_0=D0, Dirichlet_1=D1)
-
-        sol = np.linalg.solve(Stiffness,Rhs)
-        sol_hho = hho_vector_from_sol(pd_dir,sol)
-        
-        condition_number = np.linalg.cond(Stiffness)
-        print(f"Stiffness matrix condition number: {condition_number}")   
-
-        X, plot_sol     = interpolate(pd_dir,sol,    n_sampling=100,is_super = False)
-        X, plot_sol_hho = interpolate(pd_dir,sol_hho,n_sampling=100,is_super = True )
+        sol, sol_hho = Solve_HHO_Problem(pd_dir) 
+ 
+        X, plot_sol     = interpolate(pd_dir,sol,    n_sampling=20,is_super = False)
+        X, plot_sol_hho = interpolate(pd_dir,sol_hho,n_sampling=20,is_super = True )
         
         X_F = np.linspace(0,pd_dir.domain_length,pd_dir.n_cells+1)
         V_F = sol[pd_dir.n_cells*(pd_dir.K+1):]
@@ -553,5 +582,80 @@ if __name__=='__main__':
         plt.savefig("dirichlet_bc.png")  # Save as PNG
         #plt.show()
 
+        D0 = pd_dir.Dirichlet_0; D1 = pd_dir.Dirichlet_1
+        ref_solution = (D1-D0)*X/pd_dir.domain_length + (D0)
+        error_hho = np.linalg.norm(plot_sol_hho-ref_solution)/np.linalg.norm(ref_solution)*100
+        error_sol = np.linalg.norm(plot_sol-ref_solution)/np.linalg.norm(ref_solution)*100
+        print(f"\ntest #2: Dirichlet problem - relative error (in percent)")
+        print(f"\t - no reconstruction      : {error_sol}")
+        print(f"\t - with HHO reconstruction: {error_hho}")
 
+    elif TEST_ID == 3:
+        # Dirichlet - Neumann 
+        pd_dir_neu = ProblemDefinition()
+        pd_dir_neu.domain_length = 1
+        pd_dir_neu.K = 0
+        pd_dir_neu.n_cells = 10
+        # BCs
+        pd_dir_neu.Dirichlet_0 = -3; 
+        pd_dir_neu.Neumann_1 = 2
+        pd_dir_neu.initialize()
+
+        sol, sol_hho = Solve_HHO_Problem(pd_dir_neu) 
+
+        X, plot_sol     = interpolate(pd_dir_neu,sol,    n_sampling=20,is_super = False)
+        X, plot_sol_hho = interpolate(pd_dir_neu,sol_hho,n_sampling=20,is_super = True )
+        
+        X_F = np.linspace(0,pd_dir_neu.domain_length,pd_dir_neu.n_cells+1)
+        V_F = sol[pd_dir_neu.n_cells*(pd_dir_neu.K+1):]
+        plt.figure(figsize=(10,6))
+        plt.plot(X, plot_sol_hho,'b--',label='Reconstruction')
+        plt.plot(X, plot_sol,'r.',label='Cell function')
+        plt.plot(X_F,V_F,'k*',label='Face Function')
+        plt.legend()
+        plt.savefig("dirichlet-Neumann_bc.png")  # Save as PNG
+        #plt.show()
+
+        D0 = pd_dir_neu.Dirichlet_0; N1 = pd_dir_neu.Neumann_1
+        ref_solution = N1*X/pd_dir_neu.domain_length + (D0)
+        error_hho = np.linalg.norm(plot_sol_hho-ref_solution)/np.linalg.norm(ref_solution)*100
+        error_sol = np.linalg.norm(plot_sol-ref_solution)/np.linalg.norm(ref_solution)*100
+        print(f"\ntest #3: Dirichlet-Neuman problem - relative error (in percent)")
+        print(f"\t - no reconstruction      : {error_sol}")
+        print(f"\t - with HHO reconstruction: {error_hho}")
+
+    elif TEST_ID == 4:
+        # Dirichlet - Neumann 
+        pd_all = ProblemDefinition()
+        pd_all.domain_length = 1
+        pd_all.K = 0
+        pd_all.n_cells = 10
+        # BCs
+        pd_all.Dirichlet_0 = 0; 
+        pd_all.Neumann_1 = 1
+        pd_all.Source_func = lambda x: np.sin(np.pi*x)
+        pd_all.initialize()
+
+        sol, sol_hho = Solve_HHO_Problem(pd_all) 
+
+        X, plot_sol     = interpolate(pd_all,sol,    n_sampling=20,is_super = False)
+        X, plot_sol_hho = interpolate(pd_all,sol_hho,n_sampling=20,is_super = True )
+        
+        X_F = np.linspace(0,pd_all.domain_length,pd_all.n_cells+1)
+        V_F = sol[pd_all.n_cells*(pd_all.K+1):]
+        plt.figure(figsize=(10,6))
+        plt.plot(X, plot_sol_hho,'b--',label='Reconstruction')
+        plt.plot(X, plot_sol,'r.',label='Cell function')
+        plt.plot(X_F,V_F,'k*',label='Face Function')
+        plt.legend()
+        plt.savefig("dirichlet-Neumann_bc.png")  # Save as PNG
+        #plt.show()
+
+        D0 = pd_all.Dirichlet_0; N1 = pd_all.Neumann_1
+        ref_solution = N1*X/pd_all.domain_length + (D0)
+        error_hho = np.linalg.norm(plot_sol_hho-ref_solution)/np.linalg.norm(ref_solution)*100
+        error_sol = np.linalg.norm(plot_sol-ref_solution)/np.linalg.norm(ref_solution)*100
+        print(f"\ntest #3: Dirichlet-Neuman problem - relative error (in percent)")
+        print(f"\t - no reconstruction      : {error_sol}")
+        print(f"\t - with HHO reconstruction: {error_hho}")
  
