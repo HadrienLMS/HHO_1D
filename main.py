@@ -3,14 +3,10 @@ import scipy as sp
 import matplotlib.pyplot as plt
 from scipy.integrate import quad
 
-# pd.n_cells: number of cells
-# pd.h: cell diameter, uniform for all elements
-# pd.K: polynomial degree, equal for all elements
-
-# cell dofs of all the cells first 
-# then the edge dofs 
-
-# Github copilot hadrien-beriot_SAGCP
+# 1D HHO code from Chapter 8 of  
+# CICUTTIN, Matteo; ERN, Alexandre; PIGNET, Nicolas. 
+# "Hybrid High-Order Methods: a primer with applications to solid mechanics"
+# Cham, Switzerland: Springer, 2021.
 
 class ProblemDefinition:
     def __init__(self):
@@ -109,9 +105,10 @@ def get_dofs_super(pd,elem):
     return elem_dofs_super, cell_dofs_super, face_dofs_super
 
 def basis(x, x_bar, h, max_k):
-    # Listing 8.1 Possible implementation of a function evaluating the scaled monomial
-    # scalar basis and its derivatives in a 1D cell.
-    # convert to local coord x_tilde in [-1,1]  
+    """ 
+    Listing 8.1 Possible implementation of a function evaluating the scaled monomial
+    scalar basis and its derivatives in a 1D cell.
+    """  
     x_tilde = 2*(x-x_bar)/h 
     phi = np.zeros(max_k+1)
     dphi = np.zeros(max_k+1)
@@ -141,9 +138,9 @@ def fun_rhs_vector(pd, order, elem, fun):
     return rhs
 
 def hho_reduction(pd, elem, fun):
-    # Listing 8.2 Possible implementation of the reduction operator in 1D.
-    # Simple L^2 projection at order p !
-    # contains also projection on face dofs   
+    """
+    Listing 8.2 Possible implementation of the reduction operator in 1D.
+    """   
     order = pd.K
     mass = get_matrices(pd, order, elem)[0]
     v_rhs = fun_rhs_vector(pd, order, elem, fun)
@@ -156,20 +153,16 @@ def hho_reduction(pd, elem, fun):
     return I
 
 def hho_reconstruction(pd,elem): 
-    # Listing 8.3 Possible implementation of the reconstruction operator in 1D.
+    """
+    Listing 8.3 Possible implementation of the reconstruction operator in 1D.
     
     # R translates a vector from P_d^{k} to P_d^{k+1}
     # if v is a vector of HHO solution then R@v is in P_d^{k+1} 
-    # hence we have K = R^T @ K+ @ R, where K+ is the stiffness matrix of order K+1
-    # such R it translates the vector of unknowns into a higher degree space 
-    # issue is that we have to remove the constant term from the stiffness matrix
-    # and then add it back again. So we find first K*
-    # K* R = T - F1 - F2
-
+    # such that R translates the vector of unknowns into a higher degree space 
     # A := R.T @ K_star @ R
     #      2x4 @  4x4   @ 4x2 (linear K=0)
     # where K_star is a standard stiffness matrix of order K+1 with constant removed 
-            
+    """        
     x_bar = cell_center(pd, elem)
     xF1, xF2 = face_centers(pd, elem)
     
@@ -218,13 +211,15 @@ def get_phi_norm(pd, elem, order):
     return phi_norm
 
 def hho_vector_from_sol(pd,v_sol):
-    # reconstruct HHO vector in P_d^{k+1}
-    # from solution vector in P_d^{k} using reconstruction operator R
+    """
+    Reconstruct HHO vector in P_d^{k+1} 
+    from solution vector in P_d^{k} using reconstruction operator R
+    """
     v_hho = np.zeros(pd.n_dofs_super)
     for elem in range(pd.n_cells):
         elem_dofs, cell_dofs, face_dofs = get_dofs(pd,elem)
         elem_dofs_super, cell_dofs_super, face_dofs_super = get_dofs_super(pd,elem)
-        A_elem, R_elem = hho_reconstruction(pd, elem)
+        R_elem = hho_reconstruction(pd, elem)[1]
         vstar = R_elem @ v_sol[elem_dofs]
         vT = v_sol[cell_dofs]
         # need the constant term of cell dofs 
@@ -240,7 +235,9 @@ def hho_vector_from_sol(pd,v_sol):
     return v_hho
 
 def compute_cell_vector_norm(pd, elem, vector, order, is_constant = False):
-    # compute the norm of a vector on a cell - up to a constant
+    """
+    compute the norm of a vector on a cell - w/ or w/o the constant (monomial basis)
+    """
     if is_constant:
         phi_start_index = 0
     else:
@@ -295,13 +292,13 @@ def hho_stabilization(pd, elem, R):
     return S
 
 def HHO_check_operators(pd, v_func, fig_name = None):
-    # Need to replace everything after I calculation 
-
-    # hho reduction --> simple L^2
+    """
+    Check the HHO operators on a single run
+    """
+    # hho reduction --> simple L^2 projection
     I = np.zeros(pd.n_dofs)
-    # hho stiffness - using reconstruction R^T @ K* @ R and then adding the constant term
-    A = np.zeros((pd.n_dofs,pd.n_dofs))
-    S = np.zeros_like(A)
+    # hho stabilization
+    S = np.zeros((pd.n_dofs,pd.n_dofs))
     
     n_sampling = 20
     X = np.zeros(pd.n_cells*n_sampling)
@@ -309,58 +306,46 @@ def HHO_check_operators(pd, v_func, fig_name = None):
     V_L2 = np.zeros_like(X)
     V_REF = np.zeros_like(X)
     epsilon = 0
+
+    # First assemble "I", L2 projection of the target function
     for elem in range(pd.n_cells):
-        x_bar = cell_center(pd, elem)        
-        xF1, xF2 = face_centers(pd,elem)
-        elem_dofs, cell_dofs, face_dofs = get_dofs(pd,elem)
-
-        # hho_reduction is a simple L2 projection at order p
+        elem_dofs = get_dofs(pd,elem)[0]
         I_elem = hho_reduction(pd, elem, v_func)
-        I[elem_dofs] += I_elem
+        # Note: should not accumulate I here !!!
+        # otherwise sums up L^2 projection of v_func on faces (which is wrong)
+        I[elem_dofs] = I_elem
 
-        # Assemble HHO stifness matrix --> A = (∇RT (·),∇RT (·))L2(T ) - still missing the constant term though
-        A_elem, R_elem = hho_reconstruction(pd, elem)
-        A[np.ix_(elem_dofs, elem_dofs)] += A_elem 
+    # Then, reconstruct the HHO super convergent vector from "R"
+    V = hho_vector_from_sol(pd,I)
+
+    # Finally assemble the stabilization matrix "S"
+    for elem in range(pd.n_cells):
+        R_elem = hho_reconstruction(pd, elem)[1]
+        S_elem = hho_stabilization(pd, elem, R_elem)
+        S[np.ix_(elem_dofs, elem_dofs)] += S_elem
+
+    # local errors on the jump/stabilization
+    epsilon += I.T @ S @ I
     
-        # get the super convergent solution in the cell (up to a constant)
-        # I is a solution vector in P_d^k, containing the L2 projection of v(x) in each cell
-        # R is a reconstruction matrix from P_d^k to P_d^{k+1} - up to a constant
-        v_star = R_elem @ I_elem  
-
-        # now adjust the constant    
-        norm_vstar = compute_cell_vector_norm(pd, elem, v_star, pd.K+1, is_constant = False)
-        #norm_vstar = get_vstar_norm(pd, elem, v_star)        
-        norm_vT, error = quad(v_func, xF1, xF2, epsabs=1e-12, epsrel=1e-12)
-        v = np.zeros(v_star.shape[0]+1)
-        v[1:] = v_star
-        v[0] = (norm_vT - norm_vstar)/pd.h 
-
-        # also get a classical projection (L^2) for comparison
-        mass = get_matrices(pd, pd.K, elem)[0]
-        v_rhs = fun_rhs_vector(pd, pd.K, elem, v_func)
-        coeffs_L2 = np.linalg.solve(mass,v_rhs)
-
-        # plot it 
+    # Plot everything and compute pointwise errors
+    for elem in range(pd.n_cells):
+        x_bar = cell_center(pd, elem)
+        xF1, xF2 = face_centers(pd,elem)
+        cell_dofs = get_dofs(pd,elem)[1]
+        cell_dofs_super = get_dofs_super(pd,elem)[1]
         x_plot = np.linspace(xF1,xF2,n_sampling)
         for i, x in enumerate(x_plot):
             # order k+1
-            phi = basis(x, x_bar, pd.h, pd.K+1)[0]
-            V_HHO[elem*n_sampling+i] = np.dot(v,phi)
-            # order k (L^2)
+            phi_super = basis(x, x_bar, pd.h, pd.K+1)[0]
+            V_HHO[elem*n_sampling+i] = np.dot(V[cell_dofs_super],phi_super)
+            # order k
             phi = basis(x, x_bar, pd.h, pd.K)[0]
-            V_L2[elem*n_sampling+i] = np.dot(coeffs_L2,phi)
+            V_L2[elem*n_sampling+i] = np.dot(I[cell_dofs],phi)
             X[elem*n_sampling+i] = x
         
         # target function
         v_ref = [v_func(x) for x in x_plot]
         V_REF[elem*n_sampling:(elem+1)*n_sampling] = v_ref
-
-        # stabilization matrix
-        S_elem = hho_stabilization(pd, elem, R_elem)
-        S[np.ix_(elem_dofs, elem_dofs)] += S_elem
-
-        # compute the error on the jump
-        epsilon += I_elem.T @ S_elem @ I_elem
 
     # compute and print errors
     error_L2 = np.linalg.norm(V_L2 - V_REF)/np.linalg.norm(V_REF)*100
@@ -373,7 +358,7 @@ def HHO_check_operators(pd, v_func, fig_name = None):
 
     X_F = np.linspace(0, pd.domain_length, pd.n_cells + 1)
     V_F = np.array([v_func(x) for x in X_F])
-    # plot the result 
+    # plot the result like in Figs 8.4
     if fig_name is not None:
         plt.figure(figsize=(10,6))
         #plt.plot(X,V_REF,'r-',label='v(x) - reference')
@@ -383,28 +368,13 @@ def HHO_check_operators(pd, v_func, fig_name = None):
         plt.legend()
         plt.savefig(fig_name + ".png")  # Save as PNG
 
-    # ############################################
-    # # Try now a global reduction V_L2 = PHI @ I
-    # ############################################
-    # n_sampling = 100
-    # PHI = np.zeros((pd.n_cells*n_sampling,pd.n_dofs))
-    # for elem in range(pd.n_cells):
-    #     # from (8.11)    
-    #     x_bar = cell_center(pd, elem)
-    #     xF1, xF2 = face_centers(pd,elem)
-    #     elem_dofs, cell_dofs, face_dofs = get_dofs(pd,elem) 
-    #     x_plot = np.linspace(xF1,xF2,n_sampling)
-    #     for i, x in enumerate(x_plot):
-    #         phi = basis(x, x_bar, pd.h, pd.K)[0]
-    #         PHI[elem*n_sampling+i,cell_dofs] = phi
-        
-    # V_L2 = PHI @ I
-
     return error_L2, error_HHO, error_jump
 
 def HHO_Assemble_Stiffness(pd):
-    # Assemble HHO stifness matrix 
-    # A = (∇RT (·),∇RT (·))L2(T ) - still missing the constant term though
+    """
+    Assemble HHO stifness matrix 
+    # A = (∇RT (·),∇RT (·))L2(T ) 
+    """ 
     A = np.zeros((pd.n_dofs,pd.n_dofs))
     S = np.zeros_like(A)
     
@@ -421,13 +391,17 @@ def HHO_Assemble_Stiffness(pd):
     return Stiffness
 
 def HHO_Apply_Neumann_BC(pd,rhs_vector):
-    # Enforce Neumann BC at the end    
+    """ 
+    Enforce Neumann BC at the end (last dof)    
+    """
     if pd.Neumann_1 is not None:
         rhs_vector[-1] = pd.Neumann_1
     return rhs_vector
 
 def HHO_Apply_Dirichlet_BC(pd,Stiffness,rhs_vector):
-    # Enforce Dirichlet BC by constraint
+    """ 
+    Enforce Dirichlet BC by constraint
+    """
     if pd.Dirichlet_0 is not None:
         dof_0 = get_face_dofs(pd,elem=0)[0]
         rhs_vector[dof_0] = pd.Dirichlet_0 
@@ -440,7 +414,9 @@ def HHO_Apply_Dirichlet_BC(pd,Stiffness,rhs_vector):
     return Stiffness, rhs_vector
 
 def HHO_Apply_Source(pd,rhs_vector):
-    # Enforce Dirichlet BC by constraint
+    """ 
+    Apply a volume source term to the right-hand side
+    """
     if pd.Source_func is not None:
         for elem in range(pd.n_cells):
             x_bar = cell_center(pd, elem)
@@ -452,7 +428,9 @@ def HHO_Apply_Source(pd,rhs_vector):
     return rhs_vector
 
 def interpolate(pd,sol,n_sampling,is_super = False):
-    # Interpolate on mesh a solution vector (super-convergent or not)
+    """ 
+    Interpolate solution vector on 1D mesh (super-convergent or not)
+    """
     X = np.zeros(pd.n_cells*n_sampling)
     V = np.zeros(pd.n_cells*n_sampling)
     for elem in range(pd.n_cells):
@@ -473,7 +451,9 @@ def interpolate(pd,sol,n_sampling,is_super = False):
     return X, V
 
 def Solve_HHO_Problem(pd):
-    # SINGLE RUN WITH NEUMAN OR DIRICHLET BC
+    """ 
+    SINGLE RUN OF HHO SOLVER
+    """
     Rhs = np.zeros(pd.n_dofs)
     Stiffness = HHO_Assemble_Stiffness(pd)
     Stiffness, Rhs  = HHO_Apply_Dirichlet_BC(pd, Stiffness, Rhs)
@@ -493,28 +473,28 @@ def Solve_HHO_Problem(pd):
 ###############################################################
 ###############################################################
 if __name__=='__main__':
+    """
+    A. Operators Check
+    TEST_ID = 0 --> OPERATORS CHECK (TARGET FUNCTION) ON A SINGLE RUN - FIG 8.9
+    TEST_ID = 1 --> OPERATORS CHECK (TARGET FUNCTION) - CONVERGENCE
 
-    # Operators Check
-    # TEST_ID = 0 --> OPERATORS CHECK (TARGET FUNCTION) ON A SINGLE RUN - FIG 8.9
-    # TEST_ID = 1 --> OPERATORS CHECK (TARGET FUNCTION) - CONVERGENCE
+    B. Solving 1D problems
+    TEST_ID = 2 --> DIRICHLET PROBLEM, SINGLE RUN
+    TEST_ID = 3 --> DIRICHLET-NEUMANN PROBLEM, SINGLE RUN
+    TEST_ID = 4 --> DIRICHLET-NEUMANN PROBLEM + SOURCE TERM, SINGLE RUN
+    TEST_ID = 5 --> DIRICHLET-NEUMANN PROBLEM + SOURCE TERM, CONVERGENCE 
 
-    # Solving real 1D problems
-    # TEST_ID = 2 --> DIRICHLET PROBLEM, SINGLE RUN
-    # TEST_ID = 3 --> DIRICHLET-NEUMANN PROBLEM, SINGLE RUN
-    # TEST_ID = 4 --> DIRICHLET-NEUMANN PROBLEM + SOURCE TERM, SINGLE RUN
-    # TEST_ID = 5 --> DIRICHLET-NEUMANN PROBLEM + SOURCE TERM, CONVERGENCE 
+    STILL TO DO: static condensation 
+    """
     
-    # To do next: 
-    # - static condensation 
-    
-    TEST_ID = 5
+    TEST_ID = 4
 
     if TEST_ID == 0:
         pd_single_run = ProblemDefinition()
         pd_single_run.domain_length = 1
         # target function 
         v_func = lambda x: np.sin(np.pi*x)
-        
+
         pd_single_run.K = 0
         pd_single_run.n_cells = 8
         pd_single_run.initialize()
@@ -636,7 +616,7 @@ if __name__=='__main__':
         pd_all.n_cells = 1
         # BCs
         pd_all.Dirichlet_0 = 0; 
-        pd_all.Neumann_1 = 0.1
+        pd_all.Neumann_1 = 0
         pd_all.Source_func = lambda x: np.sin(np.pi*x)
         pd_all.initialize()
 
@@ -664,7 +644,7 @@ if __name__=='__main__':
 
         error_hho = np.linalg.norm(plot_sol_hho-plot_ref)/np.linalg.norm(plot_ref)*100
         error_sol = np.linalg.norm(plot_sol-plot_ref)/np.linalg.norm(plot_ref)*100
-        print(f"\ntest #3: Dirichlet-Neuman problem - relative error (in percent)")
+        print(f"\ntest #4: Dirichlet-Neuman problem - relative error (in percent)")
         print(f"\t - no reconstruction      : {error_sol}")
         print(f"\t - with HHO reconstruction: {error_hho}")
 
@@ -701,7 +681,7 @@ if __name__=='__main__':
 
                 error_hho = np.linalg.norm(plot_sol_hho-plot_ref)/np.linalg.norm(plot_ref)*100
                 error_sol = np.linalg.norm(plot_sol-plot_ref)/np.linalg.norm(plot_ref)*100
-                print(f"\ntest #3: Dirichlet-Neuman problem - relative error (in percent)")
+                print(f"\ntest #5: Dirichlet-Neuman problem - relative error (in percent)")
                 print(f"\t - no reconstruction      : {error_sol}")
                 print(f"\t - with HHO reconstruction: {error_hho}")
 
